@@ -938,13 +938,59 @@ const POOL_NAME_MAP = {
   '角色联动调谐':'10','武器联动调谐':'11',
 };
 
-function getIconUrl(resourceId, resourceType) {
+// ============================================================
+// Icon source: encore.moe API (resourceId → icon URL mapping)
+// icons hosted at api.encore.moe, mapping fetched from api-v2.encore.moe;
+// wuthery CDN is retired (dead + ID mapping offsets).
+// ============================================================
+const ICON_MAP_KEY = 'wuwa-icon-map';
+const ICON_MAP_TTL = 7 * 24 * 3600 * 1000;
+const ICON_MAP_API = {
+  character: 'https://api-v2.encore.moe/api/en/character',
+  weapon: 'https://api-v2.encore.moe/api/en/weapon'
+};
+let ICON_MAP = {};
+
+function readIconMapCache() {
+  try {
+    const cached = JSON.parse(localStorage.getItem(ICON_MAP_KEY) || 'null');
+    if (cached && cached.map && Date.now() - cached.ts < ICON_MAP_TTL && Object.keys(cached.map).length) {
+      return cached.map;
+    }
+  } catch (e) { /* corrupt cache — refetch */ }
+  return null;
+}
+
+async function loadIconMap() {
+  const cached = readIconMapCache();
+  if (cached) { ICON_MAP = cached; return; }
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 4000);
+    const [charResp, weaponResp] = await Promise.all([
+      fetch(ICON_MAP_API.character, { signal: ctrl.signal }),
+      fetch(ICON_MAP_API.weapon, { signal: ctrl.signal })
+    ]);
+    clearTimeout(timer);
+    const charData = await charResp.json();
+    const weaponData = await weaponResp.json();
+    const map = {};
+    for (const c of (charData.roleList || [])) {
+      if (c.Id && c.RoleHeadIcon) map[c.Id] = c.RoleHeadIcon;
+    }
+    for (const w of (weaponData.weapons || [])) {
+      if (w.Id && w.Icon) map[w.Id] = w.Icon;
+    }
+    if (Object.keys(map).length) {
+      ICON_MAP = map;
+      try { localStorage.setItem(ICON_MAP_KEY, JSON.stringify({ ts: Date.now(), map })); } catch (e) { /* quota */ }
+    }
+  } catch (e) { /* API unreachable — icons fall back to placeholders */ }
+}
+
+function getIconUrl(resourceId) {
   if (!resourceId) return '';
-  if (resourceType === '角色') {
-    return `https://files.wuthery.com/p/GameData/IDFiedResources/Common/Image/IconRoleHead256/${resourceId}.png`;
-  } else {
-    return `https://files.wuthery.com/p/GameData/IDFiedResources/Common/Image/IconWeapon160/${resourceId}.png`;
-  }
+  return ICON_MAP[Number(resourceId)] || '';
 }
 
 const POOL_CONFIG = {
@@ -1180,11 +1226,11 @@ function renderPoolContent(pid, a) {
     else if(s.upTag==='guaranteed')tag='<span class="tag guaranteed">大保底出</span>';
     else if(s.upTag==='selected')tag='<span class="tag weapon-up">自选</span>';
     else if(s.upTag==='standard')tag='<span class="tag standard">常驻</span>';
-    const ic=getIconUrl(s.resourceId, s.resourceType);
+    const ic=getIconUrl(s.resourceId);
     s5rows+=`<tr class="star5-row"><td class="td-num">${r5.length-i}</td><td class="td-icon">${ic?`<img src="${ic}" loading="lazy" alt="${s.name}" onerror="this.style.display='none'">`:''}</td><td class="td-name">${s.name}</td><td class="td-type">${s.resourceType}</td><td class="td-pity"><strong>${s.pity}</strong> 抽</td><td class="td-time">${s.time}</td><td class="td-tag">${tag}</td></tr>`;
   }
   for (let i=0;i<r4.length;i++) {
-    const s=r4[i], ic=getIconUrl(s.resourceId, s.resourceType);
+    const s=r4[i], ic=getIconUrl(s.resourceId);
     s4rows+=`<tr class="star4-row"><td class="td-num">${r4.length-i}</td><td class="td-icon">${ic?`<img src="${ic}" loading="lazy" alt="${s.name}" onerror="this.style.display='none'">`:''}</td><td class="td-name">${s.name}</td><td class="td-type">${s.resourceType}</td><td class="td-pity"><strong>${s.pity}</strong> 抽</td><td class="td-time">${s.time}</td><td class="td-tag-empty"></td></tr>`;
   }
 
@@ -1284,7 +1330,7 @@ function renderRecordSection(pid, a) {
   // ── 宫格排列 ──
   let gridHtml = '<div class="grid-records">';
   for (const r of displayRecords) {
-    const ic = getIconUrl(r.resourceId, r.resourceType);
+    const ic = getIconUrl(r.resourceId);
     const star = r.qualityLevel === 5 ? 'star5' : r.qualityLevel === 4 ? 'star4' : '';
     let tagHtml = '';
     if (r.upTag === 'up') tagHtml = '<span class="card-tag up">UP</span>';
@@ -1324,7 +1370,7 @@ function renderRecordSection(pid, a) {
   const s5list = a.stars5 ? [...a.stars5].reverse() : [];
   for (const s of s5list) {
     const pct = Math.min(100, s.pity / cfg.pity5 * 100);
-    const ic = getIconUrl(s.resourceId, s.resourceType);
+    const ic = getIconUrl(s.resourceId);
     // 进度条颜色类型：UP=green, lost=orange, guaranteed=green-stripe, standard=neutral
     let barCls = 'up';
     let tagLabel = '';
@@ -1541,7 +1587,7 @@ function renderAll() {
   document.getElementById('header-meta').textContent = `UID: ${uid} | 数据截至: ${now}`;
 }
 
-function loadAndRender() {
+async function loadAndRender() {
   const stored = sessionStorage.getItem('gacha_data');
   if (!stored) {
     document.getElementById('overview').innerHTML = '<div style="text-align:center;color:var(--colorNeutralForeground3);padding:40px;grid-column:1/-1">暂无数据，请先上传抽卡记录</div>';
@@ -1550,6 +1596,7 @@ function loadAndRender() {
   }
   try {
     RAW_DATA = JSON.parse(stored);
+    await loadIconMap();
     renderAll();
   } catch (e) {
     document.getElementById('overview').innerHTML = '<div style="text-align:center;color:var(--colorNeutralForeground3);padding:40px;grid-column:1/-1">数据解析失败</div>';
