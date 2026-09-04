@@ -807,6 +807,13 @@ function handleMerge(file) {
   reader.onload = function(e) {
     try {
       const historyData = JSON.parse(e.target.result);
+      // Guard: refuse to merge records from a different account
+      const curUid = String(RAW_DATA.uid || '');
+      const hisUid = String(historyData.uid || '');
+      if (curUid && hisUid && curUid !== hisUid) {
+        showToast('error', '合并中止', `UID 不一致：当前 ${curUid}，文件 ${hisUid}，请确认是同一账号的记录`, 6000);
+        return;
+      }
       const merged = mergeData(RAW_DATA, historyData);
       RAW_DATA = merged;
       sessionStorage.setItem('gacha_data', JSON.stringify(RAW_DATA));
@@ -861,12 +868,23 @@ function _mergePool(currentRecords, historyRecords) {
   };
 
   // Sort both inputs to ensure correct order (data may have been sanitized)
-  // Determine which side is "newer" (more records) — merge should be symmetric
-  let oldRecs = stableSortDesc(currentRecords);
-  let newRecs = stableSortDesc(historyRecords);
-  // Ensure newRecs is the larger/newer dataset for correct truncation logic
-  if (newRecs.length < oldRecs.length) {
-    [oldRecs, newRecs] = [newRecs, oldRecs];
+  const curSorted = stableSortDesc(currentRecords);
+  const hisSorted = stableSortDesc(historyRecords);
+
+  // Decide which side is the "newer" dataset by the LATEST record time — never by
+  // record count. The game API only returns the last ~6 months, so a fresh fetch
+  // usually holds far FEWER records than a long-kept merged history file. Picking
+  // by count would treat the old history as the new side, truncate the fresh fetch
+  // at the overlap and silently drop every pull made after the old file was saved.
+  // On equal latest times, keep the in-page current data as the newer side (it is
+  // what the user just fetched/loaded); the merge stays symmetric either way.
+  const curLatest = curSorted.length ? (curSorted[0].time || '') : '';
+  const hisLatest = hisSorted.length ? (hisSorted[0].time || '') : '';
+  let newRecs, oldRecs;
+  if (hisLatest > curLatest) {
+    newRecs = hisSorted; oldRecs = curSorted;
+  } else {
+    newRecs = curSorted; oldRecs = hisSorted;
   }
 
   const newKeySet = new Set(newRecs.map(recordKey));
